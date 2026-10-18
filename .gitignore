@@ -6,6 +6,7 @@
 
 frontend/.env
 backend/.env
+backend/node_modules
 
 # Dependencies
 node_modules/
