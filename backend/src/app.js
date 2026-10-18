@@ -182,4 +182,178 @@ function evaluatePixel(sample) {
     }
 });
 
+
+app.get("/api/sentinel/visualization", async (req, res) => {
+    try {
+        const {
+            bbox,
+            from,
+            to,
+            type = "true-color",
+            width = 512,
+            height = 512,
+        } = req.query;
+
+        if (!bbox || !from || !to) {
+            return res.status(400).json({
+                success: false,
+                message: "Please provide bbox, from, and to.",
+            });
+        }
+
+        if (!["true-color", "false-color"].includes(type)) {
+            return res.status(400).json({
+                success: false,
+                message: "type must be true-color or false-color.",
+            });
+        }
+
+        const coordinates = bbox.split(",").map(Number);
+        const imageWidth = Number(width);
+        const imageHeight = Number(height);
+        const startDate = new Date(from);
+        const endDate = new Date(to);
+
+        if (
+            coordinates.length !== 4 ||
+            coordinates.some((n) => !Number.isFinite(n)) ||
+            coordinates[0] < -180 ||
+            coordinates[2] > 180 ||
+            coordinates[1] < -90 ||
+            coordinates[3] > 90 ||
+            coordinates[0] >= coordinates[2] ||
+            coordinates[1] >= coordinates[3]
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid bbox. Use minLon,minLat,maxLon,maxLat.",
+            });
+        }
+
+        if (
+            !Number.isInteger(imageWidth) ||
+            !Number.isInteger(imageHeight) ||
+            imageWidth < 1 || imageWidth > 2500 ||
+            imageHeight < 1 || imageHeight > 2500
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Image dimensions must be between 1 and 2500.",
+            });
+        }
+
+        if (
+            Number.isNaN(startDate.getTime()) ||
+            Number.isNaN(endDate.getTime()) ||
+            startDate > endDate
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid date range.",
+            });
+        }
+
+        const token = await getSentinelHubToken();
+
+        // True color: red, green, blue.
+        // False color: near-infrared, red, green.
+        const evalscript = type === "true-color"
+            ? `//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["B02", "B03", "B04", "dataMask"] }],
+        output: {
+            bands: 4,
+            sampleType: "AUTO"
+        }
+    };
+}
+function evaluatePixel(s) {
+    if (s.dataMask === 0) return [0, 0, 0, 0];
+    return [s.B04 * 2.5, s.B03 * 2.5, s.B02 * 2.5, 1];
+}`
+            : `//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["B03", "B04", "B08", "dataMask"] }],
+        output: {
+            bands: 4,
+            sampleType: "AUTO"
+        }
+    };
+}
+function evaluatePixel(s) {
+    if (s.dataMask === 0) return [0, 0, 0, 0];
+    return [s.B08 * 2.5, s.B04 * 2.5, s.B03 * 2.5, 1];
+}`;
+
+        const response = await fetch(
+            "https://sh.dataspace.copernicus.eu/api/v1/process",
+            {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                    Accept: "image/png",
+                },
+                body: JSON.stringify({
+                    input: {
+                        bounds: { bbox: coordinates },
+                        data: [{
+                            type: "sentinel-2-l2a",
+                            dataFilter: {
+                                timeRange: {
+                                    from: `${from}T00:00:00Z`,
+                                    to: `${to}T23:59:59Z`,
+                                },
+                                mosaickingOrder: "leastCC",
+                                maxCloudCoverage: 30,
+                            },
+                        }],
+                    },
+                    output: {
+                        width: imageWidth,
+                        height: imageHeight,
+                        responses: [{
+                            identifier: "default",
+                            format: { type: "image/png" },
+                        }],
+                    },
+                    evalscript,
+                }),
+            }
+        );
+
+        if (!response.ok) {
+            const details = await response.text();
+            console.error(
+                "Satellite visualization failed:",
+                response.status,
+                details.slice(0, 1000)
+            );
+
+            return res.status(502).json({
+                success: false,
+                message: "Could not generate satellite visualization.",
+                upstreamStatus: response.status,
+            });
+        }
+
+        const image = Buffer.from(await response.arrayBuffer());
+
+        res.setHeader("Content-Type", "image/png");
+        res.setHeader("Cache-Control", "no-store");
+
+        return res.send(image);
+    } catch (error) {
+        console.error("Visualization endpoint failed:", error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to generate satellite visualization.",
+        });
+    }
+});
+
+
 export default app;

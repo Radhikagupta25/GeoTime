@@ -62,6 +62,10 @@ function App() {
   const ndviObjectUrlRef = useRef(null);
   const ndviRefreshRef = useRef(null);
   const ndviRequestIdRef = useRef(0);
+  const [visualizationType, setVisualizationType] = useState("");
+  const [visualizationLoading, setVisualizationLoading] = useState(false);
+  const visualizationObjectUrlRef = useRef(null);
+  const visualizationRequestIdRef = useRef(0);
 
   useEffect(() => {
     const token = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
@@ -507,6 +511,169 @@ function App() {
     setNotice("NDVI overlay turned off.");
   }
   ndviRefreshRef.current = runNdviAnalysis;
+
+  async function runSatelliteVisualization(type) {
+    const map = mapRef.current;
+
+    if (!map || !map.isStyleLoaded()) {
+      setNotice("Map is still loading. Please try again.");
+      return;
+    }
+
+    if (map.getZoom() < 7) {
+      setNotice("Search for a location and zoom in before loading imagery.");
+      return;
+    }
+
+    if (!startDate || !endDate || startDate > endDate) {
+      setNotice("Please select a valid observation date range.");
+      return;
+    }
+
+    const bounds = map.getBounds();
+    const minLon = Math.max(-180, bounds.getWest());
+    const minLat = Math.max(-80, bounds.getSouth());
+    const maxLon = Math.min(180, bounds.getEast());
+    const maxLat = Math.min(84, bounds.getNorth());
+
+    if (minLon >= maxLon || minLat >= maxLat) {
+      setNotice("The current map bounds are invalid.");
+      return;
+    }
+
+    const requestId = ++visualizationRequestIdRef.current;
+    setVisualizationLoading(true);
+    setNotice(`Loading ${type === "true-color" ? "True Color" : "False Color"} imagery...`);
+
+    let imageUrl = null;
+
+    try {
+      const params = new URLSearchParams({
+        bbox: `${minLon},${minLat},${maxLon},${maxLat}`,
+        from: startDate,
+        to: endDate,
+        type,
+        width: "512",
+        height: "512",
+      });
+
+      const response = await fetch(
+        `/api/sentinel/visualization?${params}`
+      );
+
+      const contentType = response.headers.get("content-type") || "";
+
+      if (!response.ok || !contentType.includes("image/png")) {
+        const body = await response.text();
+        console.error("Satellite visualization error:", response.status, body.slice(0, 1000));
+        throw new Error(`Satellite imagery request failed (${response.status}).`);
+      }
+
+      const blob = await response.blob();
+
+      if (requestId !== visualizationRequestIdRef.current) {
+        return;
+      }
+
+      imageUrl = URL.createObjectURL(blob);
+
+      // Replace the old visualization only after the new image arrives.
+      if (map.getLayer("satellite-visualization-layer")) {
+        map.removeLayer("satellite-visualization-layer");
+      }
+
+      if (map.getSource("satellite-visualization-source")) {
+        map.removeSource("satellite-visualization-source");
+      }
+
+      // Switching visualization also turns off the NDVI overlay.
+      if (map.getLayer("ndvi-layer")) {
+        map.removeLayer("ndvi-layer");
+      }
+
+      if (map.getSource("ndvi-source")) {
+        map.removeSource("ndvi-source");
+      }
+
+      if (ndviObjectUrlRef.current) {
+        URL.revokeObjectURL(ndviObjectUrlRef.current);
+        ndviObjectUrlRef.current = null;
+      }
+
+      setNdviActive(false);
+
+      map.addSource("satellite-visualization-source", {
+        type: "image",
+        url: imageUrl,
+        coordinates: [
+          [minLon, maxLat],
+          [maxLon, maxLat],
+          [maxLon, minLat],
+          [minLon, minLat],
+        ],
+      });
+
+      map.addLayer({
+        id: "satellite-visualization-layer",
+        type: "raster",
+        source: "satellite-visualization-source",
+        paint: {
+          "raster-opacity": 1,
+          "raster-fade-duration": 0,
+        },
+      });
+
+      const previousUrl = visualizationObjectUrlRef.current;
+      visualizationObjectUrlRef.current = imageUrl;
+      imageUrl = null;
+
+      if (previousUrl) {
+        URL.revokeObjectURL(previousUrl);
+      }
+
+      setVisualizationType(type);
+      setNotice(
+        `${type === "true-color" ? "True Color" : "False Color"} imagery loaded.`
+      );
+    } catch (error) {
+      if (requestId === visualizationRequestIdRef.current) {
+        console.error(error);
+        setNotice(error.message || "Could not load satellite imagery.");
+      }
+    } finally {
+      if (imageUrl) {
+        URL.revokeObjectURL(imageUrl);
+      }
+
+      if (requestId === visualizationRequestIdRef.current) {
+        setVisualizationLoading(false);
+      }
+    }
+  }
+
+  function clearSatelliteVisualization() {
+    visualizationRequestIdRef.current += 1;
+    setVisualizationLoading(false);
+
+    const map = mapRef.current;
+
+    if (map?.getLayer("satellite-visualization-layer")) {
+      map.removeLayer("satellite-visualization-layer");
+    }
+
+    if (map?.getSource("satellite-visualization-source")) {
+      map.removeSource("satellite-visualization-source");
+    }
+
+    if (visualizationObjectUrlRef.current) {
+      URL.revokeObjectURL(visualizationObjectUrlRef.current);
+      visualizationObjectUrlRef.current = null;
+    }
+
+    setVisualizationType("");
+    setNotice("Satellite visualization turned off.");
+  }
+
   const activeTool = TOOL_ITEMS.find((tool) => tool.id === activePanel);
   const ActiveIcon = activeTool?.icon;
 
@@ -738,6 +905,65 @@ function App() {
                 <div className="flex items-center gap-2 text-sm">
                   <Satellite size={17} className="text-emerald-300" />
                   Satellite basemap
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-white/3 p-3">
+                  <div className="mb-3 flex items-center gap-2">
+                    <Satellite size={17} className="text-emerald-300" />
+                    <p className="text-sm font-medium">Satellite visualizations</p>
+                  </div>
+
+                  <p className="mb-3 text-xs leading-5 text-slate-400">
+                    Generate imagery for the current map area and selected dates.
+                  </p>
+
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => runSatelliteVisualization("true-color")}
+                      disabled={visualizationLoading}
+                      className={`w-full rounded-xl border p-3 text-left text-sm transition disabled:opacity-60 ${visualizationType === "true-color"
+                          ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
+                          : "border-white/10 bg-white/3 text-slate-200 hover:bg-white/8"
+                        }`}
+                    >
+                      <span className="block font-medium">True Color</span>
+                      <span className="mt-1 block text-xs text-slate-400">
+                        Natural-looking satellite imagery
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => runSatelliteVisualization("false-color")}
+                      disabled={visualizationLoading}
+                      className={`w-full rounded-xl border p-3 text-left text-sm transition disabled:opacity-60 ${visualizationType === "false-color"
+                          ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
+                          : "border-white/10 bg-white/3 text-slate-200 hover:bg-white/8"
+                        }`}
+                    >
+                      <span className="block font-medium">False Color Infrared</span>
+                      <span className="mt-1 block text-xs text-slate-400">
+                        Highlights vegetation in red tones
+                      </span>
+                    </button>
+
+                    {visualizationLoading && (
+                      <p className="text-xs text-emerald-300">
+                        Processing satellite imagery...
+                      </p>
+                    )}
+
+                    {visualizationType && !visualizationLoading && (
+                      <button
+                        type="button"
+                        onClick={clearSatelliteVisualization}
+                        className="w-full rounded-xl border border-white/10 py-2.5 text-xs text-slate-300 hover:bg-white/5"
+                      >
+                        Turn off satellite visualization
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <p className="mt-1 text-xs text-slate-400">
                   Current Mapbox map style.
