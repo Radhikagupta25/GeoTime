@@ -201,10 +201,10 @@ app.get("/api/sentinel/visualization", async (req, res) => {
             });
         }
 
-        if (!["true-color", "false-color"].includes(type)) {
+        if (!["true-color", "false-color", "water"].includes(type)) {
             return res.status(400).json({
                 success: false,
-                message: "type must be true-color or false-color.",
+                message: "type must be true-color, false-color, or water.",
             });
         }
 
@@ -257,8 +257,10 @@ app.get("/api/sentinel/visualization", async (req, res) => {
 
         // True color: red, green, blue.
         // False color: near-infrared, red, green.
-        const evalscript = type === "true-color"
-            ? `//VERSION=3
+
+        const evalscript =
+            type === "true-color"
+                ? `//VERSION=3
 function setup() {
     return {
         input: [{ bands: ["B02", "B03", "B04", "dataMask"] }],
@@ -272,7 +274,8 @@ function evaluatePixel(s) {
     if (s.dataMask === 0) return [0, 0, 0, 0];
     return [s.B04 * 2.5, s.B03 * 2.5, s.B02 * 2.5, 1];
 }`
-            : `//VERSION=3
+                : type === "false-color"
+                    ? `//VERSION=3
 function setup() {
     return {
         input: [{ bands: ["B03", "B04", "B08", "dataMask"] }],
@@ -285,7 +288,32 @@ function setup() {
 function evaluatePixel(s) {
     if (s.dataMask === 0) return [0, 0, 0, 0];
     return [s.B08 * 2.5, s.B04 * 2.5, s.B03 * 2.5, 1];
+}`
+                    : `//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["B03", "B08", "dataMask"] }],
+        output: {
+            bands: 4,
+            sampleType: "AUTO"
+        }
+    };
+}
+function evaluatePixel(s) {
+    if (s.dataMask === 0) return [0, 0, 0, 0];
+
+    const denominator = s.B03 + s.B08;
+    if (denominator === 0) return [0, 0, 0, 0];
+
+    const ndwi = (s.B03 - s.B08) / denominator;
+
+    if (ndwi > 0.15) {
+        return [0.05, 0.35, 1, 1];
+    }
+
+    return [0, 0, 0, 0];
 }`;
+
 
         const response = await fetch(
             "https://sh.dataspace.copernicus.eu/api/v1/process",

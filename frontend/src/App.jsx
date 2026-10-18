@@ -542,8 +542,14 @@ function App() {
     }
 
     const requestId = ++visualizationRequestIdRef.current;
+    const visualizationName =
+      type === "true-color"
+        ? "True Color"
+        : type === "false-color"
+          ? "False Color"
+          : "Water Detection";
     setVisualizationLoading(true);
-    setNotice(`Loading ${type === "true-color" ? "True Color" : "False Color"} imagery...`);
+    setNotice(`${visualizationName} imagery loaded.`);
 
     let imageUrl = null;
 
@@ -923,8 +929,8 @@ function App() {
                       onClick={() => runSatelliteVisualization("true-color")}
                       disabled={visualizationLoading}
                       className={`w-full rounded-xl border p-3 text-left text-sm transition disabled:opacity-60 ${visualizationType === "true-color"
-                          ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
-                          : "border-white/10 bg-white/3 text-slate-200 hover:bg-white/8"
+                        ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
+                        : "border-white/10 bg-white/3 text-slate-200 hover:bg-white/8"
                         }`}
                     >
                       <span className="block font-medium">True Color</span>
@@ -938,8 +944,8 @@ function App() {
                       onClick={() => runSatelliteVisualization("false-color")}
                       disabled={visualizationLoading}
                       className={`w-full rounded-xl border p-3 text-left text-sm transition disabled:opacity-60 ${visualizationType === "false-color"
-                          ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
-                          : "border-white/10 bg-white/3 text-slate-200 hover:bg-white/8"
+                        ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
+                        : "border-white/10 bg-white/3 text-slate-200 hover:bg-white/8"
                         }`}
                     >
                       <span className="block font-medium">False Color Infrared</span>
@@ -1039,6 +1045,36 @@ function App() {
                   </p>
                 )}
               </div>
+
+
+              <div className="rounded-xl border border-sky-400/20 bg-sky-400/5 p-3">
+                <div className="flex items-center gap-2">
+                  <Satellite size={18} className="text-sky-300" />
+                  <p className="text-sm font-medium">Water Detection</p>
+                </div>
+
+                <p className="mt-2 text-xs leading-5 text-slate-400">
+                  Identify likely surface water in the current map area using
+                  Sentinel-2 imagery.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={() => runSatelliteVisualization("water")}
+                  disabled={visualizationLoading}
+                  className={`mt-3 w-full rounded-xl py-3 text-sm font-semibold transition disabled:opacity-60 ${visualizationType === "water"
+                    ? "border border-sky-400/40 bg-sky-400/10 text-sky-300"
+                    : "bg-sky-400 text-slate-950 hover:bg-sky-300"
+                    }`}
+                >
+                  {visualizationLoading && visualizationType !== "water"
+                    ? "Processing imagery..."
+                    : visualizationType === "water"
+                      ? "Water detection active"
+                      : "Run water detection"}
+                </button>
+              </div>
+
 
               <div className="rounded-xl border border-white/10 bg-white/3 p-3">
                 <p className="text-sm font-medium">More analysis categories</p>
