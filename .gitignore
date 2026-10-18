@@ -1,0 +1,11 @@
+# Environment secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+frontend/.env
+backend/.env
+
+# Dependencies
+node_modules/
