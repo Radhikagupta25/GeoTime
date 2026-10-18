@@ -19,6 +19,13 @@ import {
   PanelRight,
 } from "lucide-react";
 const INITIAL_CENTER = [77.4538, 28.6692];
+function getNasaTileUrl(date) {
+  return (
+    "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/" +
+    "MODIS_Terra_CorrectedReflectance_TrueColor/default/" +
+    `${date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`
+  );
+}
 
 const TOOL_ITEMS = [
   { id: "dates", label: "Timeline", icon: Clock3 },
@@ -36,7 +43,13 @@ function App() {
     timeZone: "Asia/Kolkata",
   });
 
-  const [startDate, setStartDate] = useState(today);
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const defaultStartDate = thirtyDaysAgo.toLocaleDateString("en-CA", {
+    timeZone: "Asia/Kolkata",
+  });
+
+  const [startDate, setStartDate] = useState(defaultStartDate);
   const [endDate, setEndDate] = useState(today);
   const [activePanel, setActivePanel] = useState("");
   const [notice, setNotice] = useState("");
@@ -44,6 +57,11 @@ function App() {
   const [locationName, setLocationName] = useState("Earth");
   const [globeMode, setGlobeMode] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [ndviLoading, setNdviLoading] = useState(false);
+  const [ndviActive, setNdviActive] = useState(false);
+  const ndviObjectUrlRef = useRef(null);
+  const ndviRefreshRef = useRef(null);
+  const ndviRequestIdRef = useRef(0);
 
   useEffect(() => {
     const token = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
@@ -91,11 +109,34 @@ function App() {
         "space-color": "rgb(2, 4, 12)",
         "star-intensity": 0.7,
       });
+
+      if (!map.getSource("nasa-gibs")) {
+        map.addSource("nasa-gibs", {
+          type: "raster",
+          tiles: [getNasaTileUrl("2024-01-01")],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 9,
+          attribution:
+            'Imagery: NASA Global Imagery Browse Services (GIBS)',
+        });
+
+        map.addLayer({
+          id: "nasa-gibs-layer",
+          type: "raster",
+          source: "nasa-gibs",
+          paint: {
+            "raster-opacity": 0,
+          },
+        });
+      }
     });
 
     map.on("error", (event) => {
       console.error("Mapbox error:", event.error);
     });
+
+
 
     return () => {
       map.remove();
@@ -187,6 +228,14 @@ function App() {
       return;
     }
 
+    const nasaSource = mapRef.current?.getSource("nasa-gibs");
+
+    if (!nasaSource) {
+      setNotice("NASA imagery layer is not ready yet.");
+      return;
+    }
+    nasaSource.setTiles([getNasaTileUrl(endDate)]);
+
     setActivePanel("");
     setNotice(
       `Selected period: ${startDate} to ${endDate}. Historical imagery integration is next.`
@@ -236,6 +285,228 @@ function App() {
     );
   }
 
+  async function runNdviAnalysis(silent = false) {
+    const map = mapRef.current;
+
+    if (!map || !map.isStyleLoaded()) {
+      if (!silent) {
+        setNotice("Map is still loading. Please try again shortly.");
+      }
+      return;
+    }
+
+    if (map.getZoom() < 7) {
+      if (!silent) {
+        setNotice("Search for a location and zoom in before running NDVI.");
+      }
+      return;
+    }
+
+    if (!startDate || !endDate || startDate > endDate) {
+      if (!silent) {
+        setNotice("Please select a valid observation date range.");
+      }
+      return;
+    }
+
+    const bounds = map.getBounds();
+
+    const minLon = Math.max(-180, bounds.getWest());
+    const minLat = Math.max(-80, bounds.getSouth());
+    const maxLon = Math.min(180, bounds.getEast());
+    const maxLat = Math.min(84, bounds.getNorth());
+
+    if (minLon >= maxLon || minLat >= maxLat) {
+      if (!silent) {
+        setNotice("The current map view has invalid analysis bounds.");
+      }
+      return;
+    }
+    const requestId = ++ndviRequestIdRef.current;
+
+    setNdviLoading(true);
+
+    if (!silent) {
+      setNotice("Requesting Sentinel-2 vegetation imagery...");
+    }
+
+    let imageUrl = null;
+
+    try {
+      const params = new URLSearchParams({
+        bbox: `${minLon},${minLat},${maxLon},${maxLat}`,
+        from: startDate,
+        to: endDate,
+        width: "512",
+        height: "512",
+      });
+
+      const response = await fetch(
+        `/api/sentinel/ndvi?${params}`
+      );
+
+      const contentType = response.headers.get("content-type") || "";
+
+      if (!response.ok || !contentType.includes("image/png")) {
+        const body = await response.text();
+
+        console.error("NDVI response diagnostics:", {
+          status: response.status,
+          contentType,
+          body: body.slice(0, 1000),
+        });
+
+        throw new Error(
+          `NDVI request failed: HTTP ${response.status}, ${contentType || "unknown content type"
+          }.`
+        );
+      }
+
+      const imageBlob = await response.blob();
+
+      if (requestId !== ndviRequestIdRef.current) {
+        return;
+      }
+
+      imageUrl = URL.createObjectURL(imageBlob);
+
+      const imageCoordinates = [
+        [minLon, maxLat],
+        [maxLon, maxLat],
+        [maxLon, minLat],
+        [minLon, minLat],
+      ];
+
+      const existingSource = map.getSource("ndvi-source");
+
+      if (existingSource) {
+        // Keep the current layer visible and update its image only
+        // after the new request has returned successfully.
+        existingSource.updateImage({
+          url: imageUrl,
+          coordinates: imageCoordinates,
+        });
+      } else {
+        map.addSource("ndvi-source", {
+          type: "image",
+          url: imageUrl,
+          coordinates: imageCoordinates,
+        });
+
+        map.addLayer({
+          id: "ndvi-layer",
+          type: "raster",
+          source: "ndvi-source",
+          paint: {
+            "raster-opacity": 1,
+            "raster-fade-duration": 0,
+          },
+        });
+      }
+
+      const previousImageUrl = ndviObjectUrlRef.current;
+      ndviObjectUrlRef.current = imageUrl;
+      imageUrl = null;
+      if (previousImageUrl) {
+        URL.revokeObjectURL(previousImageUrl);
+      }
+      map.addSource("ndvi-source", {
+        type: "image",
+        url: imageUrl,
+        coordinates: [
+          [minLon, maxLat], // top-left
+          [maxLon, maxLat], // top-right
+          [maxLon, minLat], // bottom-right
+          [minLon, minLat], // bottom-left
+        ],
+      });
+
+      map.addLayer({
+        id: "ndvi-layer",
+        type: "raster",
+        source: "ndvi-source",
+        paint: {
+          "raster-opacity": 1,
+          "raster-fade-duration": 0,
+        },
+      });
+
+      ndviObjectUrlRef.current = imageUrl;
+      imageUrl = null;
+
+      setNdviActive(true);
+
+      if (!silent) {
+        setNotice("NDVI vegetation visualization is displayed.");
+      }
+    } catch (error) {
+      if (requestId !== ndviRequestIdRef.current) {
+        return;
+      }
+
+      console.error("NDVI analysis failed:", error);
+
+      if (!silent) {
+        setNotice(error.message || "Could not load NDVI imagery.");
+      }
+    } finally {
+      if (imageUrl) {
+        URL.revokeObjectURL(imageUrl);
+      }
+
+      if (requestId === ndviRequestIdRef.current) {
+        setNdviLoading(false);
+      }
+    }
+  }
+
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!map || !ndviActive) return;
+
+    let timeoutId;
+
+    const handleMoveEnd = () => {
+      clearTimeout(timeoutId);
+
+      timeoutId = setTimeout(() => {
+        ndviRefreshRef.current?.(true);
+      }, 800);
+    };
+
+    map.on("moveend", handleMoveEnd);
+
+    return () => {
+      clearTimeout(timeoutId);
+      map.off("moveend", handleMoveEnd);
+    };
+  }, [ndviActive]);
+
+
+  function clearNdviLayer() {
+    ndviRequestIdRef.current += 1;
+    setNdviLoading(false);
+    const map = mapRef.current;
+
+    if (map?.getLayer("ndvi-layer")) {
+      map.removeLayer("ndvi-layer");
+    }
+
+    if (map?.getSource("ndvi-source")) {
+      map.removeSource("ndvi-source");
+    }
+
+    if (ndviObjectUrlRef.current) {
+      URL.revokeObjectURL(ndviObjectUrlRef.current);
+      ndviObjectUrlRef.current = null;
+    }
+
+    setNdviActive(false);
+    setNotice("NDVI overlay turned off.");
+  }
+  ndviRefreshRef.current = runNdviAnalysis;
   const activeTool = TOOL_ITEMS.find((tool) => tool.id === activePanel);
   const ActiveIcon = activeTool?.icon;
 
@@ -257,11 +528,11 @@ function App() {
             <Globe2 size={23} strokeWidth={1.6} />
           </span>
 
-          <span className="hidden text-left sm:block">
+          <span className="block text-left">
             <span className="block text-base font-semibold tracking-tight">
               Geo<span className="text-emerald-400">Time</span>
             </span>
-            <span className="hidden text-[9px] uppercase tracking-[0.18em] text-slate-500 md:block">
+            <span className="hidden text-[9px] uppercase tracking-[0.18em] text-slate-500 sm:block">
               Travel In Time
             </span>
           </span>
@@ -483,26 +754,73 @@ function App() {
           {activePanel === "analyze" && (
             <div className="space-y-3">
               <p className="text-xs leading-5 text-slate-400">
-                Planned analysis categories. No change detections are performed
-                by this panel yet.
+                Analyze satellite imagery for vegetation health using
+                Sentinel-2 red and near-infrared bands.
               </p>
 
-              {[
-                ["Forest cover", "Deforestation and vegetation changes"],
-                ["Urban growth", "Expansion of built-up areas"],
-                ["Water bodies", "Changes in visible water extent"],
-                ["Fire activity", "Satellite-reported fire detections"],
-              ].map(([title, description]) => (
-                <div
-                  key={title}
-                  className="rounded-xl border border-white/10 bg-white/3 p-3"
-                >
-                  <p className="text-sm font-medium">{title}</p>
-                  <p className="mt-1 text-xs leading-5 text-slate-400">
-                    {description}
-                  </p>
+              <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-3">
+                <div className="flex items-center gap-2">
+                  <Satellite size={18} className="text-emerald-300" />
+                  <p className="text-sm font-medium">Forest cover</p>
                 </div>
-              ))}
+
+                <p className="mt-2 text-xs leading-5 text-slate-400">
+                  Generate an NDVI visualization for the current map area
+                  and selected observation dates.
+                </p>
+
+                <div className="mt-3 rounded-lg bg-black/20 p-3">
+                  <p className="text-xs text-slate-300">NDVI color guide</p>
+
+                  <div className="mt-2 space-y-2 text-xs text-slate-400">
+                    {[
+                      ["#73402B", "Below 0 — water, bare surfaces, or other non-vegetated pixels"],
+                      ["#CCB34D", "0–0.2 — low vegetation index"],
+                      ["#B3D94D", "0.2–0.4 — moderate-low index"],
+                      ["#40B340", "0.4–0.6 — moderate-high index"],
+                      ["#0D6626", "Above 0.6 — high vegetation index"],
+                    ].map(([color, label]) => (
+                      <div key={label} className="flex items-center gap-2">
+                        <span
+                          className="h-3 w-3 shrink-0 rounded-sm"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span>{label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={ndviActive ? clearNdviLayer : runNdviAnalysis}
+                  disabled={ndviLoading}
+                  className={`mt-4 w-full rounded-xl py-3 text-sm font-semibold transition disabled:cursor-wait disabled:opacity-60 ${ndviActive
+                    ? "border border-white/15 bg-white/10 text-white hover:bg-white/15"
+                    : "bg-emerald-400 text-[#06110c] hover:bg-emerald-300"
+                    }`}
+                >
+                  {ndviLoading
+                    ? "Processing satellite imagery..."
+                    : ndviActive
+                      ? "Turn off NDVI overlay"
+                      : "Run vegetation analysis"}
+                </button>
+
+                {ndviActive && (
+                  <p className="mt-3 text-xs text-emerald-300">
+                    NDVI overlay active on the map.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-white/3 p-3">
+                <p className="text-sm font-medium">More analysis categories</p>
+                <p className="mt-1 text-xs leading-5 text-slate-400">
+                  Urban growth, water-body changes, and fire activity
+                  can be integrated in later steps.
+                </p>
+              </div>
             </div>
           )}
         </section>
