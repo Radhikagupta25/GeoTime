@@ -384,4 +384,181 @@ function evaluatePixel(s) {
 });
 
 
+
+app.get("/api/firms/fires", async (req, res) => {
+    try {
+        const { bbox, from, to } = req.query;
+        const mapKey = process.env.FIRMS_MAP_KEY;
+
+        if (!mapKey) {
+            return res.status(500).json({
+                success: false,
+                message: "NASA FIRMS API key is missing.",
+            });
+        }
+
+        if (!bbox || !from || !to) {
+            return res.status(400).json({
+                success: false,
+                message: "Please provide bbox, from, and to.",
+            });
+        }
+
+        const coordinates = bbox.split(",").map(Number);
+
+        if (
+            coordinates.length !== 4 ||
+            coordinates.some((n) => !Number.isFinite(n)) ||
+            coordinates[0] < -180 ||
+            coordinates[2] > 180 ||
+            coordinates[1] < -90 ||
+            coordinates[3] > 90 ||
+            coordinates[0] >= coordinates[2] ||
+            coordinates[1] >= coordinates[3]
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid bounding box.",
+            });
+        }
+
+        // Require strict YYYY-MM-DD dates.
+        const isValidDate = (value) => {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+
+            const date = new Date(`${value}T00:00:00Z`);
+
+            return (
+                !Number.isNaN(date.getTime()) &&
+                date.toISOString().slice(0, 10) === value
+            );
+        };
+
+        if (!isValidDate(from) || !isValidDate(to) || from > to) {
+            return res.status(400).json({
+                success: false,
+                message: "Please provide valid dates in YYYY-MM-DD format.",
+            });
+        }
+
+        const startDate = new Date(`${from}T00:00:00Z`);
+        const endDate = new Date(`${to}T00:00:00Z`);
+
+        const totalDays =
+            Math.floor((endDate - startDate) / 86400000) + 1;
+
+        // Protect the API from excessively large requests.
+        if (totalDays > 90) {
+            return res.status(400).json({
+                success: false,
+                message: "Fire detection currently supports a maximum of 90 days.",
+            });
+        }
+
+        const area = coordinates.join(",");
+        const allFeatures = [];
+
+        // NASA FIRMS Area API supports up to 5 days per request.
+        for (let offset = 0; offset < totalDays; offset += 5) {
+            const chunkStart = new Date(
+                startDate.getTime() + offset * 86400000
+            );
+
+            const chunkDays = Math.min(5, totalDays - offset);
+
+            const chunkDate = chunkStart.toISOString().slice(0, 10);
+
+            const url =
+                `https://firms.modaps.eosdis.nasa.gov/api/area/csv/` +
+                `${encodeURIComponent(mapKey)}/VIIRS_SNPP_NRT/` +
+                `${area}/${chunkDays}/${chunkDate}`;
+
+            const response = await fetch(url);
+
+            if (!response.ok) {
+                const details = await response.text();
+
+                console.error(
+                    `NASA FIRMS failed for ${chunkDate}:`,
+                    response.status,
+                    details.slice(0, 500)
+                );
+
+                return res.status(502).json({
+                    success: false,
+                    message: `NASA FIRMS failed while fetching data starting ${chunkDate}.`,
+                    upstreamStatus: response.status,
+                });
+            }
+
+            const csv = await response.text();
+            const lines = csv.trim().split(/\r?\n/);
+
+            if (lines.length < 2) continue;
+
+            const headers = lines[0].split(",").map((h) => h.trim());
+
+            for (const line of lines.slice(1)) {
+                if (!line.trim()) continue;
+
+                const values = line.split(",");
+
+                const record = Object.fromEntries(
+                    headers.map((header, index) => [
+                        header,
+                        values[index]?.trim() ?? "",
+                    ])
+                );
+
+                const latitude = Number(record.latitude);
+                const longitude = Number(record.longitude);
+
+                if (
+                    !Number.isFinite(latitude) ||
+                    !Number.isFinite(longitude)
+                ) {
+                    continue;
+                }
+
+                allFeatures.push({
+                    type: "Feature",
+                    geometry: {
+                        type: "Point",
+                        coordinates: [longitude, latitude],
+                    },
+                    properties: {
+                        brightness: Number(record.bright_ti4),
+                        brightnessTemperature: Number(record.bright_ti4),
+                        confidence: record.confidence,
+                        acquisitionDate: record.acq_date,
+                        acquisitionTime: record.acq_time,
+                        satellite: record.satellite,
+                        instrument: record.instrument,
+                        fireRadiativePower: Number(record.frp),
+                        dayNight: record.daynight,
+                    },
+                });
+            }
+        }
+
+        return res.json({
+            success: true,
+            count: allFeatures.length,
+            requestedDays: totalDays,
+            chunksFetched: Math.ceil(totalDays / 5),
+            features: allFeatures,
+        });
+
+    } catch (error) {
+        console.error("NASA FIRMS endpoint failed:", error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to retrieve fire hotspot data.",
+        });
+    }
+});
+
+
+
 export default app;

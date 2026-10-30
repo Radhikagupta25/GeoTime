@@ -66,6 +66,12 @@ function App() {
   const [visualizationLoading, setVisualizationLoading] = useState(false);
   const visualizationObjectUrlRef = useRef(null);
   const visualizationRequestIdRef = useRef(0);
+  const [fireLoading, setFireLoading] = useState(false);
+  const [fireActive, setFireActive] = useState(false);
+  const [fireCount, setFireCount] = useState(0);
+  const fireRequestIdRef = useRef(0);
+  const firePopupRef = useRef(null);
+  const fireClickHandlerRef = useRef(null);
 
   useEffect(() => {
     const token = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
@@ -384,8 +390,6 @@ function App() {
       const existingSource = map.getSource("ndvi-source");
 
       if (existingSource) {
-        // Keep the current layer visible and update its image only
-        // after the new request has returned successfully.
         existingSource.updateImage({
           url: imageUrl,
           coordinates: imageCoordinates,
@@ -407,6 +411,7 @@ function App() {
           },
         });
       }
+      setNdviActive(true);
 
       const previousImageUrl = ndviObjectUrlRef.current;
       ndviObjectUrlRef.current = imageUrl;
@@ -418,10 +423,10 @@ function App() {
         type: "image",
         url: imageUrl,
         coordinates: [
-          [minLon, maxLat], // top-left
-          [maxLon, maxLat], // top-right
-          [maxLon, minLat], // bottom-right
-          [minLon, minLat], // bottom-left
+          [minLon, maxLat],
+          [maxLon, maxLat],
+          [maxLon, minLat],
+          [minLon, minLat],
         ],
       });
 
@@ -549,7 +554,7 @@ function App() {
           ? "False Color"
           : "Water Detection";
     setVisualizationLoading(true);
-    setNotice(`${visualizationName} imagery loaded.`);
+    setNotice(`Loading ${visualizationName} imagery...`);
 
     let imageUrl = null;
 
@@ -638,9 +643,7 @@ function App() {
       }
 
       setVisualizationType(type);
-      setNotice(
-        `${type === "true-color" ? "True Color" : "False Color"} imagery loaded.`
-      );
+      setNotice(`${visualizationName} imagery loaded.`);
     } catch (error) {
       if (requestId === visualizationRequestIdRef.current) {
         console.error(error);
@@ -655,6 +658,219 @@ function App() {
         setVisualizationLoading(false);
       }
     }
+  }
+
+  async function runFireDetection() {
+    const map = mapRef.current;
+
+    if (!map || !map.isStyleLoaded()) {
+      setNotice("Map is still loading. Please try again.");
+      return;
+    }
+
+    if (!startDate || !endDate || startDate > endDate) {
+      setNotice("Please select a valid observation date range.");
+      return;
+    }
+
+    const dayRange =
+      Math.floor(
+        (Date.parse(`${endDate}T00:00:00Z`) -
+          Date.parse(`${startDate}T00:00:00Z`)) / 86400000
+      ) + 1;
+
+    if (dayRange > 5) {
+      setNotice("Fire detection currently supports a maximum of 5 days.");
+      return;
+    }
+
+    const bounds = map.getBounds();
+
+    const bbox = [
+      Math.max(-180, bounds.getWest()),
+      Math.max(-90, bounds.getSouth()),
+      Math.min(180, bounds.getEast()),
+      Math.min(90, bounds.getNorth()),
+    ].join(",");
+
+    const requestId = ++fireRequestIdRef.current;
+
+    setFireLoading(true);
+    setNotice("Fetching NASA FIRMS fire detections...");
+
+    try {
+      const params = new URLSearchParams({
+        bbox,
+        from: startDate,
+        to: endDate,
+      });
+
+      const response = await fetch(`/api/firms/fires?${params}`);
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Could not retrieve fire detections.");
+      }
+
+      if (requestId !== fireRequestIdRef.current) return;
+      if (fireClickHandlerRef.current) {
+        map?.off(
+          "click",
+          "fire-hotspots-layer",
+          fireClickHandlerRef.current
+        );
+        fireClickHandlerRef.current = null;
+      }
+      if (map.getLayer("fire-hotspots-layer")) {
+        map.removeLayer("fire-hotspots-layer");
+      }
+
+      if (map.getSource("fire-hotspots-source")) {
+        map.removeSource("fire-hotspots-source");
+      }
+
+      if (firePopupRef.current) {
+        firePopupRef.current.remove();
+        firePopupRef.current = null;
+      }
+
+      const geojson = {
+        type: "FeatureCollection",
+        features: data.features,
+      };
+
+      map.addSource("fire-hotspots-source", {
+        type: "geojson",
+        data: geojson,
+      });
+
+      map.addLayer({
+        id: "fire-hotspots-layer",
+        type: "circle",
+        source: "fire-hotspots-source",
+        paint: {
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            4, 3,
+            8, 5,
+            12, 8,
+            16, 11,
+          ],
+          "circle-color": [
+            "match",
+            ["get", "confidence"],
+            "h", "#ef4444",
+            "n", "#f97316",
+            "l", "#eab308",
+            "#f97316",
+          ],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1,
+          "circle-opacity": 0.9,
+        },
+      });
+
+      const handleFireClick = (event) => {
+        const feature = event.features?.[0];
+        if (!feature) return;
+
+        const properties = feature.properties;
+        const [longitude, latitude] = feature.geometry.coordinates;
+
+        const time = String(properties.acquisitionTime || "")
+          .padStart(4, "0");
+
+        const formattedTime = time.length === 4
+          ? `${time.slice(0, 2)}:${time.slice(2)} UTC`
+          : "Unavailable";
+
+        const safe = (value) =>
+          String(value ?? "Unavailable").replace(
+            /[&<>"']/g,
+            (character) => ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#039;",
+            })[character]
+          );
+
+        firePopupRef.current?.remove();
+
+        firePopupRef.current = new mapboxgl.Popup({
+          closeButton: true,
+          closeOnClick: false,
+          maxWidth: "280px",
+        })
+          .setLngLat([longitude, latitude])
+          .setHTML(`
+          <div style="color:#111827;font-family:Arial,sans-serif;padding:4px">
+            <strong style="font-size:14px">Fire hotspot detection</strong>
+            <p style="margin:8px 0 4px">Date: ${safe(properties.acquisitionDate)}</p>
+            <p style="margin:4px 0">Time: ${safe(formattedTime)}</p>
+            <p style="margin:4px 0">Confidence: ${safe(properties.confidence)}</p>
+            <p style="margin:4px 0">Brightness: ${safe(properties.brightness)} K</p>
+            <p style="margin:4px 0">Fire radiative power: ${safe(properties.fireRadiativePower)} MW</p>
+            <p style="margin:4px 0">Satellite: ${safe(properties.satellite)} / ${safe(properties.instrument)}</p>
+            <p style="margin:4px 0">Coordinates: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}</p>
+          </div>
+        `)
+          .addTo(map);
+      };
+
+      map.on("click", "fire-hotspots-layer", handleFireClick);
+      map.on("mouseenter", "fire-hotspots-layer", () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", "fire-hotspots-layer", () => {
+        map.getCanvas().style.cursor = "";
+      });
+
+      fireClickHandlerRef.current = handleFireClick;
+
+      setFireCount(data.count);
+      setFireActive(true);
+      setNotice(
+        data.count
+          ? `${data.count} NASA FIRMS hotspot detections displayed.`
+          : "No fire hotspot detections found in this area and date range."
+      );
+    } catch (error) {
+      if (requestId === fireRequestIdRef.current) {
+        console.error("Fire detection failed:", error);
+        setNotice(error.message || "Could not load fire detections.");
+      }
+    } finally {
+      if (requestId === fireRequestIdRef.current) {
+        setFireLoading(false);
+      }
+    }
+  }
+
+  function clearFireDetection() {
+    fireRequestIdRef.current += 1;
+    setFireLoading(false);
+
+    const map = mapRef.current;
+
+    if (map?.getLayer("fire-hotspots-layer")) {
+      map.removeLayer("fire-hotspots-layer");
+    }
+
+    if (map?.getSource("fire-hotspots-source")) {
+      map.removeSource("fire-hotspots-source");
+    }
+
+    firePopupRef.current?.remove();
+    firePopupRef.current = null;
+
+    setFireActive(false);
+    setFireCount(0);
+    setNotice("Fire hotspot layer turned off.");
   }
 
   function clearSatelliteVisualization() {
@@ -1073,6 +1289,49 @@ function App() {
                       ? "Water detection active"
                       : "Run water detection"}
                 </button>
+              </div>
+
+              <div className="rounded-xl border border-orange-400/20 bg-orange-400/5 p-3">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium">Active Fire Hotspots</p>
+                </div>
+
+                <p className="mt-2 text-xs leading-5 text-slate-400">
+                  Detect satellite-observed thermal anomalies using NASA FIRMS VIIRS data
+                  for the current map area and selected dates.
+                </p>
+
+                <div className="mt-3 rounded-lg bg-black/20 p-3">
+                  <p className="text-xs text-slate-300">Detection summary</p>
+                  <p className="mt-1 text-2xl font-semibold text-orange-300">
+                    {fireCount}
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    {fireActive ? "Hotspot detections returned" : "No active layer"}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={fireActive ? clearFireDetection : runFireDetection}
+                  disabled={fireLoading}
+                  className={`mt-3 w-full rounded-xl py-3 text-sm font-semibold transition disabled:opacity-60 ${fireActive
+                      ? "border border-white/15 bg-white/10 text-white hover:bg-white/15"
+                      : "bg-orange-400 text-slate-950 hover:bg-orange-300"
+                    }`}
+                >
+                  {fireLoading
+                    ? "Fetching fire detections..."
+                    : fireActive
+                      ? "Turn off fire hotspot layer"
+                      : "Detect fire hotspots"}
+                </button>
+
+                {fireActive && (
+                  <p className="mt-2 text-xs text-orange-300">
+                    Fire hotspot layer is displayed on the map.
+                  </p>
+                )}
               </div>
 
 
