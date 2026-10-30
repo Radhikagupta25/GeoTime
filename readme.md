@@ -51,57 +51,6 @@ It is more than a map.
 
 ---
 
-# SCREENSHOTS
-
-<!-- Add your actual screenshots to the screenshots/ directory. -->
-
-<p align="center">
-  <img src="screenshots/geotime-home.png" alt="GeoTime Main Interface" width="90%">
-  <br>
-  <em>The command deck: an interactive Earth at your fingertips</em>
-</p>
-
-<table>
-  <tr>
-    <td width="50%">
-      <img src="screenshots/timeline.png" alt="Timeline">
-      <p align="center"><em>Historical Timeline</em></p>
-    </td>
-    <td width="50%">
-      <img src="screenshots/comparison.png" alt="Satellite Comparison">
-      <p align="center"><em>Swipe Through Time: Satellite Comparison</em></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="screenshots/layers.png" alt="Satellite Layers">
-      <p align="center"><em>Satellite Visualization Layers</em></p>
-    </td>
-    <td width="50%">
-      <img src="screenshots/analysis.png" alt="Environmental Analysis">
-      <p align="center"><em>Environmental Analysis</em></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="screenshots/fire-detection.png" alt="Fire Hotspots">
-      <p align="center"><em>Live Fire Hotspot Detection</em></p>
-    </td>
-    <td width="50%">
-      <img src="screenshots/geomate.png" alt="GeoMate AI">
-      <p align="center"><em>GeoMate: Your AI Geospatial Copilot</em></p>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <img src="screenshots/research-report.png" alt="Research Report" width="100%">
-      <p align="center"><em>One-Click Automated Environmental Research Report</em></p>
-    </td>
-  </tr>
-</table>
-
----
-
 # THE PROBLEM
 
 Our planet is changing, fast.
