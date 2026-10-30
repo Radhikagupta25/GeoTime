@@ -407,6 +407,219 @@ function evaluatePixel(s) {
 });
 
 
+app.get("/api/sentinel/compare", async (req, res) => {
+    try {
+        const {
+            bbox,
+            before,
+            after,
+            width = 512,
+            height = 512,
+            type = "true-color"
+        } = req.query;
+
+        if (!["true-color", "ndvi", "water", "urban"].includes(type)) {
+            return res.status(400).json({ success: false, message: "Invalid analysis type." });
+        }
+        if (!bbox || !before || !after) {
+            return res.status(400).json({
+                success: false,
+                message: "Please provide bbox, before, and after dates.",
+            });
+        }
+
+        const isValidDate = (value) => {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+
+            const date = new Date(`${value}T00:00:00Z`);
+
+            return (
+                !Number.isNaN(date.getTime()) &&
+                date.toISOString().slice(0, 10) === value
+            );
+        };
+
+        if (
+            !isValidDate(before) ||
+            !isValidDate(after) ||
+            before >= after
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Choose two different valid dates, with the earlier date first.",
+            });
+        }
+
+        const coordinates = bbox.split(",").map(Number);
+        const imageWidth = Number(width);
+        const imageHeight = Number(height);
+
+        if (
+            coordinates.length !== 4 ||
+            coordinates.some((n) => !Number.isFinite(n)) ||
+            coordinates[0] < -180 ||
+            coordinates[2] > 180 ||
+            coordinates[1] < -90 ||
+            coordinates[3] > 90 ||
+            coordinates[0] >= coordinates[2] ||
+            coordinates[1] >= coordinates[3]
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid bounding box.",
+            });
+        }
+
+        if (
+            !Number.isInteger(imageWidth) ||
+            !Number.isInteger(imageHeight) ||
+            imageWidth < 1 || imageWidth > 2500 ||
+            imageHeight < 1 || imageHeight > 2500
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Image dimensions must be between 1 and 2500.",
+            });
+        }
+
+        const token = await getSentinelHubToken();
+
+        const bodies = {
+            "true-color": `return [base[0], base[1], base[2], 1];`,
+            ndvi: `
+        const d = s.B08 + s.B04;
+        const v = d === 0 ? 0 : (s.B08 - s.B04) / d;
+        if (v < 0) return [0.45, 0.25, 0.15, 1];
+        if (v < 0.2) return [0.8, 0.7, 0.3, 1];
+        if (v < 0.4) return [0.7, 0.85, 0.3, 1];
+        if (v < 0.6) return [0.25, 0.7, 0.25, 1];
+        return [0.05, 0.4, 0.1, 1];`,
+            water: `
+        const d = s.B03 + s.B08;
+        const v = d === 0 ? 0 : (s.B03 - s.B08) / d;
+        if (v > 0.15) return [0.05, 0.35, 1, 1];
+        return [base[0] * 0.6, base[1] * 0.6, base[2] * 0.6, 1];`,
+            urban: `
+        const d = s.B11 + s.B08;
+        const v = d === 0 ? 0 : (s.B11 - s.B08) / d;
+        if (v > 0.1) return [1, 0.45, 0.05, 1];
+        return [base[0] * 0.6, base[1] * 0.6, base[2] * 0.6, 1];`,
+        };
+
+        const evalscript = `//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["B02", "B03", "B04", "B08", "B11", "dataMask"] }],
+        output: { bands: 4, sampleType: "AUTO" }
+    };
+}
+function evaluatePixel(s) {
+    if (s.dataMask === 0) return [0, 0, 0, 0];
+    const base = [s.B04 * 2.5, s.B03 * 2.5, s.B02 * 2.5];
+    ${bodies[type]}
+}`;
+
+        console.log("COMPARE ROUTE v2 loaded");
+
+        const MIN_REAL_PNG_BYTES = 5000;
+
+        function windowFor(date, days) {
+            const center = new Date(`${date}T00:00:00Z`).getTime();
+            const start = new Date(center - days * 86400000);
+            let end = new Date(center + days * 86400000);
+            const now = new Date();
+            if (end > now) end = now;
+            return { from: start.toISOString(), to: end.toISOString() };
+        }
+
+        async function requestImage(from, to, maxCloud) {
+            const response = await fetch(
+                "https://sh.dataspace.copernicus.eu/api/v1/process",
+                {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                        Accept: "image/png",
+                    },
+                    body: JSON.stringify({
+                        input: {
+                            bounds: { bbox: coordinates },
+                            data: [{
+                                type: "sentinel-2-l2a",
+                                dataFilter: {
+                                    timeRange: { from, to },
+                                    mosaickingOrder: "leastCC",
+                                    maxCloudCoverage: maxCloud,
+                                },
+                            }],
+                        },
+                        output: {
+                            width: imageWidth,
+                            height: imageHeight,
+                            responses: [{ identifier: "default", format: { type: "image/png" } }],
+                        },
+                        evalscript,
+                    }),
+                }
+            );
+
+            if (!response.ok) {
+                const details = await response.text();
+                console.error("Comparison request failed:", response.status, details.slice(0, 1000));
+                throw new Error(`Sentinel Hub request failed (HTTP ${response.status}).`);
+            }
+
+            return Buffer.from(await response.arrayBuffer());
+        }
+
+        async function fetchImage(date) {
+            const attempts = [
+                { days: 10, cloud: 40 },
+                { days: 20, cloud: 70 },
+                { days: 30, cloud: 100 },
+            ];
+
+            for (const { days, cloud } of attempts) {
+                const { from, to } = windowFor(date, days);
+                const buffer = await requestImage(from, to, cloud);
+
+                console.log(`Compare ${date}: ±${days}d, cloud<=${cloud} -> ${buffer.length} bytes`);
+
+                if (buffer.length >= MIN_REAL_PNG_BYTES) {
+                    return buffer.toString("base64");
+                }
+            }
+
+            throw new Error(
+                `No Sentinel-2 imagery found near ${date} for this area. Try another area or date.`
+            );
+        }
+
+        const [beforeImage, afterImage] = await Promise.all([
+            fetchImage(before),
+            fetchImage(after),
+        ]);
+
+        return res.json({
+            success: true,
+            before,
+            after,
+            beforeImage,
+            afterImage,
+            type
+        });
+
+    } catch (error) {
+        console.error("Satellite comparison failed:", error.message);
+
+        return res.status(502).json({
+            success: false,
+            message: error.message || "Could not generate satellite comparison.",
+        });
+    }
+});
+
 
 app.get("/api/firms/fires", async (req, res) => {
     try {
@@ -445,7 +658,6 @@ app.get("/api/firms/fires", async (req, res) => {
             });
         }
 
-        // Require strict YYYY-MM-DD dates.
         const isValidDate = (value) => {
             if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
 
@@ -470,7 +682,6 @@ app.get("/api/firms/fires", async (req, res) => {
         const totalDays =
             Math.floor((endDate - startDate) / 86400000) + 1;
 
-        // Protect the API from excessively large requests.
         if (totalDays > 90) {
             return res.status(400).json({
                 success: false,
@@ -480,8 +691,6 @@ app.get("/api/firms/fires", async (req, res) => {
 
         const area = coordinates.join(",");
         const allFeatures = [];
-
-        // NASA FIRMS Area API supports up to 5 days per request.
         for (let offset = 0; offset < totalDays; offset += 5) {
             const chunkStart = new Date(
                 startDate.getTime() + offset * 86400000

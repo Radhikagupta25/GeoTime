@@ -37,6 +37,10 @@ const TOOL_ITEMS = [
 function App() {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
+  const [compareImages, setCompareImages] = useState(null);
+  const [comparePosition, setComparePosition] = useState(50);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareType, setCompareType] = useState("true-color");
 
   const [query, setQuery] = useState("");
   const today = new Date().toLocaleDateString("en-CA", {
@@ -248,7 +252,7 @@ function App() {
 
     setActivePanel("");
     setNotice(
-      `Selected period: ${startDate} to ${endDate}. Historical imagery integration is next.`
+      `Selected period: ${startDate} to ${endDate}.`
     );
   }
 
@@ -419,32 +423,6 @@ function App() {
       if (previousImageUrl) {
         URL.revokeObjectURL(previousImageUrl);
       }
-      map.addSource("ndvi-source", {
-        type: "image",
-        url: imageUrl,
-        coordinates: [
-          [minLon, maxLat],
-          [maxLon, maxLat],
-          [maxLon, minLat],
-          [minLon, minLat],
-        ],
-      });
-
-      map.addLayer({
-        id: "ndvi-layer",
-        type: "raster",
-        source: "ndvi-source",
-        paint: {
-          "raster-opacity": 1,
-          "raster-fade-duration": 0,
-        },
-      });
-
-      ndviObjectUrlRef.current = imageUrl;
-      imageUrl = null;
-
-      setNdviActive(true);
-
       if (!silent) {
         setNotice("NDVI vegetation visualization is displayed.");
       }
@@ -898,6 +876,99 @@ function App() {
     setNotice("Satellite visualization turned off.");
   }
 
+  async function runComparison() {
+    const map = mapRef.current;
+
+    if (!map || !map.isStyleLoaded()) {
+      setNotice("Map is still loading. Please try again.");
+      return;
+    }
+
+    if (map.getZoom() < 7) {
+      setNotice("Search for a location and zoom in before comparing imagery.");
+      return;
+    }
+
+    if (!startDate || !endDate || startDate >= endDate) {
+      setNotice("Choose two different dates. The earlier date must come first.");
+      return;
+    }
+
+    const bounds = map.getBounds();
+
+    const minLon = Math.max(-180, bounds.getWest());
+    const minLat = Math.max(-90, bounds.getSouth());
+    const maxLon = Math.min(180, bounds.getEast());
+    const maxLat = Math.min(90, bounds.getNorth());
+
+    if (minLon >= maxLon || minLat >= maxLat) {
+      setNotice("The current map bounds are invalid.");
+      return;
+    }
+
+    setCompareLoading(true);
+    setNotice("Generating satellite images for both dates...");
+
+    try {
+      const bbox = `${minLon},${minLat},${maxLon},${maxLat}`;
+      const midLat = (minLat + maxLat) / 2;
+      const ratio =
+        ((maxLon - minLon) * Math.cos((midLat * Math.PI) / 180)) /
+        (maxLat - minLat);
+
+      const MAX_SIDE = 1024;
+      const imgW = ratio >= 1 ? MAX_SIDE : Math.round(MAX_SIDE * ratio);
+      const imgH = ratio >= 1 ? Math.round(MAX_SIDE / ratio) : MAX_SIDE;
+      const params = new URLSearchParams({
+        bbox,
+        before: startDate,
+        after: endDate,
+        width: String(Math.max(256, imgW)),
+        height: String(Math.max(256, imgH)),
+        type: compareType
+      });
+
+      const response = await fetch(`/api/sentinel/compare?${params}`);
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Could not generate comparison imagery.");
+      }
+
+      setComparePosition(50);
+
+      setCompareImages({
+        before: data.beforeImage,
+        after: data.afterImage,
+        beforeDate: data.before,
+        afterDate: data.after,
+        coordinates: [
+          [minLon, maxLat],
+          [maxLon, maxLat],
+          [maxLon, minLat],
+          [minLon, minLat],
+        ],
+        center: map.getCenter().toArray(),
+        zoom: map.getZoom(),
+        bearing: map.getBearing(),
+        pitch: map.getPitch(),
+        type: compareType,
+      });
+
+      setNotice("Historical satellite comparison is ready.");
+    } catch (error) {
+      console.error("Comparison failed:", error);
+      setNotice(error.message || "Could not generate satellite comparison.");
+    } finally {
+      setCompareLoading(false);
+    }
+  }
+
+  function closeComparison() {
+    setCompareImages(null);
+    setComparePosition(50);
+  }
+
   const activeTool = TOOL_ITEMS.find((tool) => tool.id === activePanel);
   const ActiveIcon = activeTool?.icon;
 
@@ -908,6 +979,75 @@ function App() {
         className="absolute inset-0 h-full w-full"
         aria-label="Interactive three-dimensional Earth map"
       />
+      {compareImages && (
+        <div className="absolute inset-0 z-30 bg-[#02040a]">
+          <img
+            src={`data:image/png;base64,${compareImages.before}`}
+            alt="Earlier observation"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+          <img
+            src={`data:image/png;base64,${compareImages.after}`}
+            alt="Later observation"
+            className="absolute inset-0 h-full w-full object-cover"
+            style={{ clipPath: `inset(0 0 0 ${comparePosition}%)` }}
+          />
+          <div className="pointer-events-none absolute left-4 top-4 z-40 rounded-xl border border-white/10 bg-[#0b1018]/90 px-4 py-2 backdrop-blur-lg">
+            <p className="text-[10px] uppercase tracking-wider text-slate-400">
+              Earlier observation
+            </p>
+            <p className="mt-1 text-sm font-semibold text-white">
+              {compareImages.beforeDate}
+            </p>
+          </div>
+
+          <div className="pointer-events-none absolute right-4 top-4 z-40 rounded-xl border border-white/10 bg-[#0b1018]/90 px-4 py-2 text-right backdrop-blur-lg">
+            <p className="text-[10px] uppercase tracking-wider text-slate-400">
+              Later observation
+            </p>
+            <p className="mt-1 text-sm font-semibold text-white">
+              {compareImages.afterDate}
+            </p>
+          </div>
+          <div
+            className="pointer-events-none absolute bottom-0 top-0 z-40 w-0.5 bg-white shadow-lg"
+            style={{ left: `${comparePosition}%` }}
+          >
+            <div className="absolute left-1/2 top-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-emerald-400 text-[#06110c] shadow-xl">
+              <GitCompareArrows size={20} />
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={closeComparison}
+            className="absolute right-4 top-24 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1018]/90 px-4 py-3 text-sm text-white shadow-xl backdrop-blur-lg hover:bg-white/10"
+          >
+            <X size={17} />
+            Exit comparison
+          </button>
+          <div className="absolute bottom-8 left-1/2 z-50 w-[min(500px,calc(100vw-32px))] -translate-x-1/2 rounded-2xl border border-white/10 bg-[#0b1018]/95 p-4 shadow-2xl backdrop-blur-xl">
+            <div className="mb-3 flex items-center justify-between text-xs">
+              <span className="text-slate-300">Earlier</span>
+              <span className="font-medium text-emerald-300">
+                Drag to compare
+              </span>
+              <span className="text-slate-300">Later</span>
+            </div>
+
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={comparePosition}
+              onChange={(event) =>
+                setComparePosition(Number(event.target.value))
+              }
+              aria-label="Satellite image comparison slider"
+              className="w-full cursor-ew-resize accent-emerald-400"
+            />
+          </div>
+        </div>
+      )}
       <header className="absolute left-2 right-2 top-2 z-20 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-[#0b1018]/90 p-2.5 shadow-2xl shadow-black/30 backdrop-blur-xl sm:left-4 sm:right-4 sm:top-3 sm:gap-3 sm:p-3 lg:left-5 lg:right-5 lg:flex-nowrap lg:gap-4">
         <button
           type="button"
@@ -1097,9 +1237,44 @@ function App() {
                 <p className="mt-1 text-sm">{endDate}</p>
               </div>
 
-              <p className="text-xs leading-5 text-amber-200/80">
-                Comparison is a planned feature. It requires historical imagery
-                layers to be integrated first.
+              <p className="text-xs leading-5 text-slate-400">
+                Compare satellite observations of the same location. Drag the
+                divider to reveal changes between the two dates.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  ["true-color", "True Color"],
+                  ["ndvi", "Vegetation (NDVI)"],
+                  ["water", "Water"],
+                  ["urban", "Urban (NDBI)"],
+                ].map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setCompareType(id)}
+                    className={`rounded-xl border px-3 py-2.5 text-xs transition ${compareType === id
+                        ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
+                        : "border-white/10 bg-white/3 text-slate-300 hover:bg-white/8"
+                      }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={runComparison}
+                disabled={compareLoading || startDate >= endDate}
+                className="w-full rounded-xl bg-emerald-400 py-3 text-sm font-semibold text-[#06110c] transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {compareLoading
+                  ? "Generating comparison..."
+                  : "Generate satellite comparison"}
+              </button>
+
+              <p className="text-[11px] leading-5 text-slate-500">
+                Uses Sentinel-2 True Color imagery. Clearer images may be available
+                on different dates depending on cloud coverage and satellite passes.
               </p>
             </div>
           )}
@@ -1369,8 +1544,8 @@ function App() {
                   }
                   disabled={visualizationLoading}
                   className={`mt-3 w-full rounded-xl py-3 text-sm font-semibold transition disabled:opacity-60 ${visualizationType === "urban"
-                      ? "border border-orange-400/40 bg-orange-400/10 text-orange-300"
-                      : "bg-orange-400 text-slate-950 hover:bg-orange-300"
+                    ? "border border-orange-400/40 bg-orange-400/10 text-orange-300"
+                    : "bg-orange-400 text-slate-950 hover:bg-orange-300"
                     }`}
                 >
                   {visualizationLoading
