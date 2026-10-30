@@ -552,7 +552,9 @@ function App() {
         ? "True Color"
         : type === "false-color"
           ? "False Color"
-          : "Water Detection";
+          : type === "water"
+            ? "Water Detection"
+            : "Urban Expansion Detection (NDBI)";
     setVisualizationLoading(true);
     setNotice(`Loading ${visualizationName} imagery...`);
 
@@ -1316,8 +1318,8 @@ function App() {
                   onClick={fireActive ? clearFireDetection : runFireDetection}
                   disabled={fireLoading}
                   className={`mt-3 w-full rounded-xl py-3 text-sm font-semibold transition disabled:opacity-60 ${fireActive
-                      ? "border border-white/15 bg-white/10 text-white hover:bg-white/15"
-                      : "bg-orange-400 text-slate-950 hover:bg-orange-300"
+                    ? "border border-white/15 bg-white/10 text-white hover:bg-white/15"
+                    : "bg-orange-400 text-slate-950 hover:bg-orange-300"
                     }`}
                 >
                   {fireLoading
@@ -1330,6 +1332,57 @@ function App() {
                 {fireActive && (
                   <p className="mt-2 text-xs text-orange-300">
                     Fire hotspot layer is displayed on the map.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-orange-400/20 bg-orange-400/5 p-3">
+                <div className="flex items-center gap-2">
+                  <Satellite size={18} className="text-orange-300" />
+                  <p className="text-sm font-medium">Urban Expansion Detection</p>
+                </div>
+
+                <p className="mt-2 text-xs leading-5 text-slate-400">
+                  Identify likely built-up surfaces using the Normalized Difference
+                  Built-up Index (NDBI) from Sentinel-2 SWIR and near-infrared bands.
+                </p>
+
+                <div className="mt-3 rounded-lg bg-black/20 p-3">
+                  <p className="text-xs text-slate-300">NDBI interpretation</p>
+
+                  <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
+                    <span className="h-3 w-3 shrink-0 rounded-sm bg-orange-400" />
+                    <span>Above 0.1 — likely built-up surfaces</span>
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-slate-500">
+                    This is an indicative screening layer, not a definitive building
+                    classification. Bare soil and other surfaces may also appear.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    visualizationType === "urban"
+                      ? clearSatelliteVisualization()
+                      : runSatelliteVisualization("urban")
+                  }
+                  disabled={visualizationLoading}
+                  className={`mt-3 w-full rounded-xl py-3 text-sm font-semibold transition disabled:opacity-60 ${visualizationType === "urban"
+                      ? "border border-orange-400/40 bg-orange-400/10 text-orange-300"
+                      : "bg-orange-400 text-slate-950 hover:bg-orange-300"
+                    }`}
+                >
+                  {visualizationLoading
+                    ? "Processing satellite imagery..."
+                    : visualizationType === "urban"
+                      ? "Turn off urban expansion layer"
+                      : "Run urban expansion detection"}
+                </button>
+
+                {visualizationType === "urban" && (
+                  <p className="mt-2 text-xs text-orange-300">
+                    NDBI layer is active on the map.
                   </p>
                 )}
               </div>
