@@ -19,6 +19,7 @@ import {
   PanelRight,
 } from "lucide-react";
 import { generateResearchReport } from "./report";
+import GeoMate from "./GeoMate";
 const INITIAL_CENTER = [77.4538, 28.6692];
 function getNasaTileUrl(date) {
   return (
@@ -1655,6 +1656,28 @@ function App() {
           </div>
         </div>
       )}
+      <GeoMate
+        context={{
+          location: locationName,
+          dateRange: {
+            start: startDate,
+            end: endDate,
+          },
+          activeLayers: {
+            ndvi: ndviActive,
+            satelliteVisualization: visualizationType || "none",
+            fireHotspots: fireActive,
+          },
+          fireDetections: fireActive ? fireCount : null,
+          comparison: compareImages
+            ? {
+              earlierDate: compareImages.beforeDate,
+              laterDate: compareImages.afterDate,
+              type: compareType,
+            }
+            : null,
+        }}
+      />
     </main>
   );
 }
