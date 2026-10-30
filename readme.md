@@ -27,7 +27,13 @@
 </p>
 
 ---
+## Live Demo
 
+[![Live Demo](https://img.shields.io/badge/Live-Demo-brightgreen?style=for-the-badge&logo=vercel)](https://geo-time-one.vercel.app/)
+
+🔗 **Deployed Application:** https://geo-time-one.vercel.app/
+
+---
 # ABOUT
 
 **GeoTime** is a full-stack geospatial intelligence platform built to explore, compare, and analyze Earth's changing landscapes through satellite imagery and environmental data.
