@@ -18,6 +18,7 @@ import {
   CalendarDays,
   PanelRight,
 } from "lucide-react";
+import { generateResearchReport } from "./report";
 const INITIAL_CENTER = [77.4538, 28.6692];
 function getNasaTileUrl(date) {
   return (
@@ -41,6 +42,7 @@ function App() {
   const [comparePosition, setComparePosition] = useState(50);
   const [compareLoading, setCompareLoading] = useState(false);
   const [compareType, setCompareType] = useState("true-color");
+  const [reportLoading, setReportLoading] = useState(false);
 
   const [query, setQuery] = useState("");
   const today = new Date().toLocaleDateString("en-CA", {
@@ -262,11 +264,28 @@ function App() {
     setNotice("");
   }
 
-  function generateReport() {
+  async function generateReport() {
+    if (reportLoading) return;
+    const map = mapRef.current;
+
+    if (!map || !map.isStyleLoaded()) { setNotice("Map is still loading. Please try again."); return; }
+    if (map.getZoom() < 7) { setNotice("Search for a location and zoom in before generating a report."); return; }
+    if (!startDate || !endDate || startDate >= endDate) { setNotice("Choose two different dates. The earlier date must come first."); return; }
+
+    const b = map.getBounds();
+    const bbox = [Math.max(-180, b.getWest()), Math.max(-90, b.getSouth()), Math.min(180, b.getEast()), Math.min(90, b.getNorth())];
+
     setActivePanel("");
-    setNotice(
-      "PDF export will be enabled after satellite analysis and report generation are implemented."
-    );
+    setReportLoading(true);
+    try {
+      const name = await generateResearchReport({ locationName, bbox, startDate, endDate, onProgress: setNotice });
+      setNotice(`Report saved: ${name}`);
+    } catch (error) {
+      console.error("Report generation failed:", error);
+      setNotice(error.message || "Could not generate the report.");
+    } finally {
+      setReportLoading(false);
+    }
   }
 
   function locateMe() {
@@ -1253,8 +1272,8 @@ function App() {
                     type="button"
                     onClick={() => setCompareType(id)}
                     className={`rounded-xl border px-3 py-2.5 text-xs transition ${compareType === id
-                        ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
-                        : "border-white/10 bg-white/3 text-slate-300 hover:bg-white/8"
+                      ? "border-emerald-400/50 bg-emerald-400/10 text-emerald-300"
+                      : "border-white/10 bg-white/3 text-slate-300 hover:bg-white/8"
                       }`}
                   >
                     {label}
