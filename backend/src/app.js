@@ -509,12 +509,13 @@ app.get("/api/sentinel/compare", async (req, res) => {
         const evalscript = `//VERSION=3
 function setup() {
     return {
-        input: [{ bands: ["B02", "B03", "B04", "B08", "B11", "dataMask"] }],
+        input: [{ bands: ["B02", "B03", "B04", "B08", "B11", "SCL", "dataMask"] }],
         output: { bands: 4, sampleType: "AUTO" }
     };
 }
 function evaluatePixel(s) {
     if (s.dataMask === 0) return [0, 0, 0, 0];
+    ${type === "true-color" ? "" : "if (s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10 || s.SCL === 11) return [0, 0, 0, 0];"}
     const base = [s.B04 * 2.5, s.B03 * 2.5, s.B02 * 2.5];
     ${bodies[type]}
 }`;
@@ -620,6 +621,167 @@ function evaluatePixel(s) {
     }
 });
 
+app.get("/api/sentinel/stats", async (req, res) => {
+    try {
+        const { bbox, from, to, interval = 10 } = req.query;
+        const ok = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || "") && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
+        const c = (bbox || "").split(",").map(Number);
+
+        if (c.length !== 4 || c.some((n) => !Number.isFinite(n)) || c[0] >= c[2] || c[1] >= c[3] ||
+            c[0] < -180 || c[2] > 180 || c[1] < -90 || c[3] > 90 || !ok(from) || !ok(to) || from > to) {
+            return res.status(400).json({ success: false, message: "Provide a valid bbox, from and to." });
+        }
+        const days = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000 + 1;
+        if (days > 1100) {
+            return res.status(400).json({ success: false, message: "Maximum period is about 3 years." });
+        }
+        const step = Math.max(1, Math.min(60, Math.round(Number(interval)) || 10));
+        const token = await getSentinelHubToken();
+
+
+        const evalscript = `//VERSION=3
+function setup() {
+  return {
+    input: [{
+      bands: ["B03", "B04", "B08", "B11", "SCL", "dataMask"]
+    }],
+    output: [
+      { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
+      { id: "ndwi", bands: 1, sampleType: "FLOAT32" },
+      { id: "ndbi", bands: 1, sampleType: "FLOAT32" },
+      { id: "dataMask", bands: ["ndvi", "ndwi", "ndbi"] }
+    ]
+  };
+}
+
+function nd(a, b) {
+  var denominator = a + b;
+  return denominator === 0 ? 0 : (a - b) / denominator;
+}
+
+function evaluatePixel(s) {
+  var clear =
+    s.dataMask === 1 &&
+    (s.SCL === 4 || s.SCL === 5 || s.SCL === 6 || s.SCL === 7);
+
+  var mask = clear ? 1 : 0;
+
+  return {
+    ndvi: [nd(s.B08, s.B04)],
+    ndwi: [nd(s.B03, s.B08)],
+    ndbi: [nd(s.B11, s.B08)],
+    dataMask: [mask, mask, mask]
+  };
+}`;
+
+        const response = await fetch("https://sh.dataspace.copernicus.eu/api/v1/statistics", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+                input: {
+                    bounds: { bbox: c, properties: { crs: "http://www.opengis.net/def/crs/EPSG/0/4326" } },
+                    data: [{ type: "sentinel-2-l2a", dataFilter: { mosaickingOrder: "leastCC", maxCloudCoverage: 80 } }],
+                },
+                aggregation: {
+                    timeRange: { from: `${from}T00:00:00Z`, to: `${to}T23:59:59Z` },
+                    aggregationInterval: { of: `P${step}D` },
+                    lastIntervalBehavior: "SHORTEN",
+                    evalscript,
+                    resx: (c[2] - c[0]) / 400,
+                    resy: (c[3] - c[1]) / 400,
+                },
+
+                calculations: {
+                    ndvi: {
+                        histograms: {
+                            default: {
+                                nBins: 40,
+                                lowEdge: -1.0,
+                                highEdge: 1.0
+                            }
+                        },
+                        statistics: {
+                            default: {
+                                percentiles: {
+                                    k: [10, 25, 50, 75, 90]
+                                }
+                            }
+                        }
+                    },
+                    ndwi: {
+                        histograms: {
+                            default: {
+                                nBins: 40,
+                                lowEdge: -1.0,
+                                highEdge: 1.0
+                            }
+                        },
+                        statistics: {
+                            default: {
+                                percentiles: {
+                                    k: [10, 25, 50, 75, 90]
+                                }
+                            }
+                        }
+                    },
+                    ndbi: {
+                        histograms: {
+                            default: {
+                                nBins: 40,
+                                lowEdge: -1.0,
+                                highEdge: 1.0
+                            }
+                        },
+                        statistics: {
+                            default: {
+                                percentiles: {
+                                    k: [10, 25, 50, 75, 90]
+                                }
+                            }
+                        }
+                    }
+                },
+
+            }),
+        });
+
+        if (!response.ok) {
+            const details = await response.text();
+            console.error("Statistics request failed:", response.status, details.slice(0, 1500));
+            return res.status(502).json({ success: false, message: `Sentinel Hub statistics failed (HTTP ${response.status}).` });
+        }
+
+        const json = await response.json();
+        const num = (v) => (Number.isFinite(Number(v)) && v !== null ? Number(v) : null);
+
+        const series = (json.data || []).map((row) => {
+            const out = { from: row.interval.from.slice(0, 10), to: row.interval.to.slice(0, 10) };
+            for (const id of ["ndvi", "ndwi", "ndbi"]) {
+                const b = row.outputs?.[id]?.bands?.B0;
+                const st = b?.stats;
+                if (!st || !(st.sampleCount > st.noDataCount) || num(st.mean) === null) { out[id] = null; continue; }
+                const p = {};
+                for (const k of [10, 25, 50, 75, 90]) {
+                    p[k] = num(st.percentiles?.[`${k}.0`] ?? st.percentiles?.[String(k)]);
+                }
+                out[id] = {
+                    n: st.sampleCount - st.noDataCount,
+                    total: st.sampleCount,
+                    mean: num(st.mean), sd: num(st.stDev), min: num(st.min), max: num(st.max), p,
+                    hist: (b.histogram?.bins || []).map((x) => x.count),
+                    under: b.histogram?.underflowCount ?? 0,
+                    over: b.histogram?.overflowCount ?? 0,
+                };
+            }
+            return out;
+        });
+
+        return res.json({ success: true, intervalDays: step, series });
+    } catch (error) {
+        console.error("Statistics endpoint failed:", error.message);
+        return res.status(500).json({ success: false, message: "Failed to compute statistics." });
+    }
+});
 
 app.get("/api/firms/fires", async (req, res) => {
     try {
@@ -688,7 +850,8 @@ app.get("/api/firms/fires", async (req, res) => {
                 message: "Fire detection currently supports a maximum of 90 days.",
             });
         }
-
+        const ageDays = (Date.now() - endDate.getTime()) / 86400000;
+        const source = ageDays > 60 ? "VIIRS_SNPP_SP" : "VIIRS_SNPP_NRT";
         const area = coordinates.join(",");
         const allFeatures = [];
         for (let offset = 0; offset < totalDays; offset += 5) {
@@ -779,6 +942,7 @@ app.get("/api/firms/fires", async (req, res) => {
             requestedDays: totalDays,
             chunksFetched: Math.ceil(totalDays / 5),
             features: allFeatures,
+            source
         });
 
     } catch (error) {
